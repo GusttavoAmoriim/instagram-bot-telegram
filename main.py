@@ -9,11 +9,26 @@ logging.basicConfig(
     level=logging.INFO
 )
 
-# Pega o token direto das variáveis de ambiente do Render por segurança
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 
+# Lista de IDs autorizados a utilizar o bot
+ALLOWED_USERS = [
+    5161997514,  # Seu ID
+    # Quando quiser adicionar familiares, adicione uma vírgula e o ID numérico abaixo:
+    # 987654321,
+]
+
+def is_authorized(user_id: int) -> bool:
+    """Verifica se o utilizador está na lista de permissões."""
+    return user_id in ALLOWED_USERS
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👋 Olá! Envie o link de um Reels do Instagram que eu baixo para você.")
+    user_id = update.effective_user.id
+    if not is_authorized(user_id):
+        await update.message.reply_text("⛔ Acesso não autorizado. Este bot é de uso estritamente privado.")
+        return
+
+    await update.message.reply_text("👋 Olá! Envie o link de um Reels do Instagram que eu baixo para si.")
 
 def download_reel(url: str, output_path: str = "downloads") -> str:
     os.makedirs(output_path, exist_ok=True)
@@ -31,15 +46,22 @@ def download_reel(url: str, output_path: str = "downloads") -> str:
         return ydl.prepare_filename(info)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    
+    # Bloqueia quem não estiver na lista autorizada
+    if not is_authorized(user_id):
+        await update.message.reply_text("⛔ Acesso negado. Apenas membros autorizados podem utilizar este serviço.")
+        return
+
     text = update.message.text
 
     if "instagram.com" not in text:
         await update.message.reply_text("Por favor, envie um link válido do Instagram.")
         return
 
-    # Limpa parâmetros de rastreamento do link se houver
+    # Remove parâmetros de rastreamento do link
     clean_url = text.split("?")[0]
-    status_msg = await update.message.reply_text("Baixando o Reels... aguarde alguns segundos.")
+    status_msg = await update.message.reply_text("A descarregar o Reels... aguarde alguns segundos.")
 
     video_path = None
     try:
@@ -52,7 +74,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     except Exception as e:
         logging.error(f"Erro: {e}")
-        await status_msg.edit_text("Não foi possível baixar o vídeo. O perfil pode ser privado ou o Instagram bloqueou a requisição temporariamente.")
+        await status_msg.edit_text("Não foi possível transferir o vídeo. O perfil pode ser privado ou o Instagram bloqueou temporariamente.")
 
     finally:
         if video_path and os.path.exists(video_path):
