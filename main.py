@@ -1,5 +1,7 @@
 import os
 import logging
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
 import yt_dlp
@@ -11,16 +13,30 @@ logging.basicConfig(
 
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 
-# Lista de IDs autorizados a utilizar o bot
+# Lista de IDs autorizados
 ALLOWED_USERS = [
-    5161997514,  # Seu ID
-    # Quando quiser adicionar familiares, adicione uma vírgula e o ID numérico abaixo:
-    # 987654321,
+    5161997514,  # O seu ID
 ]
 
 def is_authorized(user_id: int) -> bool:
     """Verifica se o utilizador está na lista de permissões."""
     return user_id in ALLOWED_USERS
+
+# Servidor web simples para responder às verificações do Render (Web Service)
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header('Content-type', 'text/plain')
+        self.end_headers()
+        self.wfile.write(b"Bot is alive!")
+
+    def log_message(self, format, *args):
+        pass  # Silencia os logs do health check para não encher a consola
+
+def run_web_server():
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
+    server.serve_forever()
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -48,7 +64,6 @@ def download_reel(url: str, output_path: str = "downloads") -> str:
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     
-    # Bloqueia quem não estiver na lista autorizada
     if not is_authorized(user_id):
         await update.message.reply_text("⛔ Acesso negado. Apenas membros autorizados podem utilizar este serviço.")
         return
@@ -59,9 +74,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Por favor, envie um link válido do Instagram.")
         return
 
-    # Remove parâmetros de rastreamento do link
     clean_url = text.split("?")[0]
-    status_msg = await update.message.reply_text("A descarregar o Reels... aguarde alguns segundos.")
+    status_msg = await update.message.reply_text("A transferir o Reels... aguarde alguns segundos.")
 
     video_path = None
     try:
@@ -84,6 +98,11 @@ if __name__ == '__main__':
     if not TOKEN:
         raise ValueError("A variável TELEGRAM_TOKEN não foi configurada!")
 
+    # Inicia o servidor HTTP numa thread secundária para o Render marcar o serviço como "Live"
+    web_thread = threading.Thread(target=run_web_server, daemon=True)
+    web_thread.start()
+
+    # Inicia o bot do Telegram
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
