@@ -34,7 +34,8 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         pass  # Silencia os logs do health check para não encher a consola
 
 def run_web_server():
-    port = int(os.environ.get("PORT", 8080))
+    # O Render atribui a porta na variável PORT, padrão 10000
+    port = int(os.environ.get("PORT", 10000))
     server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
     server.serve_forever()
 
