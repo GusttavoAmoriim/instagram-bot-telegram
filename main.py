@@ -1,6 +1,5 @@
 import os
 import re
-import math
 import logging
 import threading
 import asyncio
@@ -53,7 +52,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(user_id):
         await update.message.reply_text("⛔ Acesso não autorizado. Este bot é de uso estritamente privado.")
         return
-    await update.message.reply_text("👋 Olá! Envie o link de um Reels do Instagram que eu descarrego para si.")
+    await update.message.reply_text("👋 Olá! Envie o link de um Reels do Instagram que eu descarrego para você.")
 
 def download_reel(url: str, output_path: str = "downloads") -> str:
     os.makedirs(output_path, exist_ok=True)
@@ -76,7 +75,6 @@ def download_reel(url: str, output_path: str = "downloads") -> str:
         return ydl.prepare_filename(info)
 
 def get_video_duration(file_path: str) -> float:
-    """Obtém a duração do vídeo em segundos via ffprobe."""
     try:
         cmd = [
             "ffprobe", "-v", "error", "-show_entries",
@@ -86,18 +84,16 @@ def get_video_duration(file_path: str) -> float:
         result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
         return float(result.stdout.strip())
     except Exception as e:
-        logging.warning(f"Não foi possível obter a duração com ffprobe: {e}")
+        logging.warning(f"Não foi possível obter duração: {e}")
         return 60.0
 
 def compress_video(input_path: str, target_size_mb: float = 38.0) -> str:
-    """Comprime o vídeo com ffmpeg ajustando a taxa de bits para atingir o tamanho pretendido."""
     duration = get_video_duration(input_path)
     if duration <= 0:
         duration = 60.0
 
-    # Calcula a taxa de bits total pretendida (bits por segundo)
     target_total_bitrate = (target_size_mb * 8 * 1024 * 1024) / duration
-    audio_bitrate = 96 * 1024  # 96 kbps para áudio
+    audio_bitrate = 96 * 1024
     video_bitrate = target_total_bitrate - audio_bitrate
 
     if video_bitrate < 150 * 1024:
@@ -123,7 +119,7 @@ def compress_video(input_path: str, target_size_mb: float = 38.0) -> str:
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not is_authorized(user_id):
-        await update.message.reply_text("⛔ Acesso negado. Apenas utilizadores autorizados podem utilizar este serviço.")
+        await update.message.reply_text("⛔ Acesso negado. Apenas usuários autorizados podem utilizar este serviço.")
         return
 
     text = update.message.text or ""
@@ -140,17 +136,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         loop = asyncio.get_running_loop()
-        # Tempo limite de 60 segundos para transferir do Instagram
         video_path = await asyncio.wait_for(
             loop.run_in_executor(None, download_reel, clean_url),
-            timeout=60.0
+            timeout=70.0
         )
 
         if video_path and os.path.exists(video_path):
             file_size_mb = os.path.getsize(video_path) / (1024 * 1024)
             final_upload_path = video_path
 
-            # Se exceder o teto da API do Telegram (50 MB), comprime com ffmpeg
             if file_size_mb > 49.0:
                 await status_msg.edit_text(f"O vídeo tem {file_size_mb:.1f} MB. A comprimir para respeitar o limite de 50 MB...")
                 compressed_path = await loop.run_in_executor(None, compress_video, video_path)
@@ -169,7 +163,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await status_msg.edit_text("⚠️ Não foi possível localizar o ficheiro transferido.")
             
     except asyncio.TimeoutError:
-        await status_msg.edit_text("⏱️ O processo demorou demasiado tempo. A ligação com o Instagram expirou.")
+        await status_msg.edit_text("⏱️ O processo demorou muito tempo. A requisição expirou.")
     except Exception as e:
         logging.error(f"Erro no processamento: {e}")
         await status_msg.edit_text(f"❌ Não foi possível enviar o vídeo: {str(e)[:120]}")
