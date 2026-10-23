@@ -58,7 +58,8 @@ def download_reel(url: str, output_path: str = "downloads") -> str:
     outtmpl = os.path.join(output_path, "%(id)s.%(ext)s")
     
     ydl_opts = {
-        'format': 'best[ext=mp4]/best',
+        # Prioriza formatos que fiquem abaixo de 49 MB para respeitar o teto do Telegram
+        'format': 'best[filesize<49M][ext=mp4]/bestvideo[filesize<42M]+bestaudio/best[ext=mp4]/best',
         'outtmpl': outtmpl,
         'quiet': True,
         'no_warnings': True,
@@ -81,7 +82,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = update.message.text or ""
     
-    # Extrai estritamente a URL do Instagram do meio de qualquer texto ou legenda
+    # Extrai o link do Instagram mesmo se houver texto ou legenda na mensagem
     match = re.search(r'(https?://(?:www\.)?instagram\.com/[^\s]+)', text)
     if not match:
         await update.message.reply_text("Por favor, envie um link válido do Instagram.")
@@ -93,23 +94,36 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         loop = asyncio.get_running_loop()
-        # Limite máximo de 35 segundos para não ficar preso eternamente
+        # Tempo limite de 45 segundos para a conclusão do download
         video_path = await asyncio.wait_for(
             loop.run_in_executor(None, download_reel, clean_url),
-            timeout=35.0
+            timeout=45.0
         )
 
         if video_path and os.path.exists(video_path):
-            with open(video_path, 'rb') as video_file:
-                await update.message.reply_video(video=video_file)
-            await status_msg.delete()
+            file_size_mb = os.path.getsize(video_path) / (1024 * 1024)
+            
+            # Limite de 50 MB imposto pela API de Bots do Telegram
+            if file_size_mb > 49.5:
+                await status_msg.edit_text(f"⚠️ O vídeo tem {file_size_mb:.1f} MB e ultrapassa o limite de 50 MB permitido pela API do Telegram.")
+            else:
+                await status_msg.edit_text("A enviar vídeo para o Telegram...")
+                with open(video_path, 'rb') as video_file:
+                    await update.message.reply_video(
+                        video=video_file,
+                        write_timeout=120,
+                        read_timeout=120,
+                        connect_timeout=60
+                    )
+                await status_msg.delete()
         else:
             await status_msg.edit_text("⚠️ Não foi possível localizar o ficheiro transferido.")
+            
     except asyncio.TimeoutError:
-        await status_msg.edit_text("⏱️ O download demorou muito tempo. O Instagram pode ter bloqueado temporariamente a requisição.")
+        await status_msg.edit_text("⏱️ O download demorou demasiado tempo. O Instagram pode estar a restringir temporariamente a ligação.")
     except Exception as e:
-        logging.error(f"Erro no download: {e}")
-        await status_msg.edit_text(f"❌ Não foi possível baixar o vídeo: {str(e)[:100]}")
+        logging.error(f"Erro no processamento: {e}")
+        await status_msg.edit_text(f"❌ Não foi possível enviar o vídeo: {str(e)[:120]}")
     finally:
         if video_path and os.path.exists(video_path):
             try:
@@ -121,6 +135,7 @@ if __name__ == '__main__':
     if not TOKEN:
         raise ValueError("A variável TELEGRAM_TOKEN não foi configurada!")
 
+    # Inicia o servidor HTTP em background para responder ao Render e UptimeRobot
     web_thread = threading.Thread(target=run_web_server, daemon=True)
     web_thread.start()
 
