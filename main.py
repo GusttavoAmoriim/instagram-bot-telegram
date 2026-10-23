@@ -1,8 +1,10 @@
 import os
 import re
+import math
 import logging
 import threading
 import asyncio
+import subprocess
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
@@ -57,9 +59,8 @@ def download_reel(url: str, output_path: str = "downloads") -> str:
     os.makedirs(output_path, exist_ok=True)
     outtmpl = os.path.join(output_path, "%(id)s.%(ext)s")
     
-    # Seleciona resoluções controladas (até 720p) e formatos mais leves para não estourar 50 MB
     ydl_opts = {
-        'format': 'bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best[ext=mp4]/best',
+        'format': 'best[ext=mp4]/best',
         'outtmpl': outtmpl,
         'quiet': True,
         'no_warnings': True,
@@ -73,6 +74,51 @@ def download_reel(url: str, output_path: str = "downloads") -> str:
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
         return ydl.prepare_filename(info)
+
+def get_video_duration(file_path: str) -> float:
+    """Obtém a duração do vídeo em segundos via ffprobe."""
+    try:
+        cmd = [
+            "ffprobe", "-v", "error", "-show_entries",
+            "format=duration", "-of", "default=noprint_wrappers=1:nokey=1",
+            file_path
+        ]
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
+        return float(result.stdout.strip())
+    except Exception as e:
+        logging.warning(f"Não foi possível obter a duração com ffprobe: {e}")
+        return 60.0
+
+def compress_video(input_path: str, target_size_mb: float = 38.0) -> str:
+    """Comprime o vídeo com ffmpeg ajustando a taxa de bits para atingir o tamanho pretendido."""
+    duration = get_video_duration(input_path)
+    if duration <= 0:
+        duration = 60.0
+
+    # Calcula a taxa de bits total pretendida (bits por segundo)
+    target_total_bitrate = (target_size_mb * 8 * 1024 * 1024) / duration
+    audio_bitrate = 96 * 1024  # 96 kbps para áudio
+    video_bitrate = target_total_bitrate - audio_bitrate
+
+    if video_bitrate < 150 * 1024:
+        video_bitrate = 150 * 1024
+
+    output_path = f"{os.path.splitext(input_path)[0]}_compressed.mp4"
+
+    cmd = [
+        "ffmpeg", "-y", "-i", input_path,
+        "-b:v", f"{int(video_bitrate)}",
+        "-maxrate", f"{int(video_bitrate * 1.3)}",
+        "-bufsize", f"{int(video_bitrate * 2)}",
+        "-preset", "veryfast",
+        "-c:v", "libx264",
+        "-c:a", "aac",
+        "-b:a", "96k",
+        output_path
+    ]
+
+    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+    return output_path
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -90,9 +136,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     clean_url = match.group(1).split("?")[0]
     status_msg = await update.message.reply_text("A transferir o Reels... aguarde alguns segundos.")
     video_path = None
+    compressed_path = None
     
     try:
         loop = asyncio.get_running_loop()
+        # Tempo limite de 60 segundos para transferir do Instagram
         video_path = await asyncio.wait_for(
             loop.run_in_executor(None, download_reel, clean_url),
             timeout=60.0
@@ -100,37 +148,38 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if video_path and os.path.exists(video_path):
             file_size_mb = os.path.getsize(video_path) / (1024 * 1024)
-            
-            # Limite estrito de 50 MB imposto pela API de Bots do Telegram
-            if file_size_mb > 49.5:
-                await status_msg.edit_text(
-                    f"⚠️ O vídeo transferido tem {file_size_mb:.1f} MB.\n"
-                    "O Telegram limita o envio de ficheiros por bots a 50 MB."
+            final_upload_path = video_path
+
+            # Se exceder o teto da API do Telegram (50 MB), comprime com ffmpeg
+            if file_size_mb > 49.0:
+                await status_msg.edit_text(f"O vídeo tem {file_size_mb:.1f} MB. A comprimir para respeitar o limite de 50 MB...")
+                compressed_path = await loop.run_in_executor(None, compress_video, video_path)
+                final_upload_path = compressed_path
+
+            await status_msg.edit_text("A enviar vídeo para o Telegram...")
+            with open(final_upload_path, 'rb') as video_file:
+                await update.message.reply_video(
+                    video=video_file,
+                    write_timeout=180,
+                    read_timeout=180,
+                    connect_timeout=60
                 )
-            else:
-                await status_msg.edit_text("A enviar vídeo para o Telegram...")
-                with open(video_path, 'rb') as video_file:
-                    await update.message.reply_video(
-                        video=video_file,
-                        write_timeout=180,
-                        read_timeout=180,
-                        connect_timeout=60
-                    )
-                await status_msg.delete()
+            await status_msg.delete()
         else:
             await status_msg.edit_text("⚠️ Não foi possível localizar o ficheiro transferido.")
             
     except asyncio.TimeoutError:
-        await status_msg.edit_text("⏱️ O download demorou demasiado tempo. A ligação com o Instagram expirou.")
+        await status_msg.edit_text("⏱️ O processo demorou demasiado tempo. A ligação com o Instagram expirou.")
     except Exception as e:
         logging.error(f"Erro no processamento: {e}")
-        await status_msg.edit_text(f"❌ Não foi possível concluir o envio: {str(e)[:120]}")
+        await status_msg.edit_text(f"❌ Não foi possível enviar o vídeo: {str(e)[:120]}")
     finally:
-        if video_path and os.path.exists(video_path):
-            try:
-                os.remove(video_path)
-            except Exception:
-                pass
+        for path in [video_path, compressed_path]:
+            if path and os.path.exists(path):
+                try:
+                    os.remove(path)
+                except Exception:
+                    pass
 
 if __name__ == '__main__':
     if not TOKEN:
