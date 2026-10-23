@@ -74,54 +74,34 @@ def download_reel(url: str, output_path: str = "downloads") -> str:
         info = ydl.extract_info(url, download=True)
         return ydl.prepare_filename(info)
 
-def get_video_duration(file_path: str) -> float:
-    try:
-        cmd = [
-            "ffprobe", "-v", "error", "-show_entries",
-            "format=duration", "-of", "default=noprint_wrappers=1:nokey=1",
-            file_path
-        ]
-        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True, timeout=10)
-        return float(result.stdout.strip())
-    except Exception as e:
-        logging.warning(f"Não foi possível obter duração: {e}")
-        return 60.0
-
-def compress_video(input_path: str, target_size_mb: float = 38.0) -> str:
-    duration = get_video_duration(input_path)
-    if duration <= 0:
-        duration = 60.0
-
-    target_total_bitrate = (target_size_mb * 8 * 1024 * 1024) / duration
-    audio_bitrate = 96 * 1024
-    video_bitrate = target_total_bitrate - audio_bitrate
-
-    if video_bitrate < 200 * 1024:
-        video_bitrate = 200 * 1024
-
+def compress_video(input_path: str) -> str:
     output_path = f"{os.path.splitext(input_path)[0]}_compressed.mp4"
 
-    # Escala segura sem aspas desnecessárias garantindo resolução par (múltiplo de 2)
-    scale_filter = "scale=trunc(iw/2)*2:trunc(ih/2)*2"
-
+    # Redimensiona mantendo proporção para largura máxima de 720px e comprime via CRF 28 (baixo consumo de RAM e alta redução de tamanho)
     cmd = [
         "ffmpeg", "-y", "-i", input_path,
-        "-vf", scale_filter,
-        "-b:v", f"{int(video_bitrate)}",
-        "-maxrate", f"{int(video_bitrate * 1.3)}",
-        "-bufsize", f"{int(video_bitrate * 2)}",
-        "-preset", "ultrafast",
+        "-vf", "scale=720:-2:flags=lanczos",
         "-c:v", "libx264",
+        "-crf", "28",
+        "-preset", "ultrafast",
         "-pix_fmt", "yuv420p",
         "-c:a", "aac",
-        "-b:a", "96k",
+        "-b:a", "128k",
         output_path
     ]
 
-    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=120)
-    if result.returncode != 0:
-        logging.error(f"Erro ffmpeg: {result.stderr}")
-        raise RuntimeError(f"Falha na compressão ffmpeg: {result.stderr[-200:] if result.stderr else 'Erro desconhecido'}")
+    process = subprocess.run(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=180
+    )
+
+    if process.returncode != 0:
+        err_msg = process.stderr.strip().splitlines()[-1] if process.stderr else "Erro desconhecido no ffmpeg"
+        logging.error(f"Erro completo ffmpeg: {process.stderr}")
+        raise RuntimeError(f"FFmpeg falhou: {err_msg}")
 
     return output_path
 
@@ -147,7 +127,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         loop = asyncio.get_running_loop()
         video_path = await asyncio.wait_for(
             loop.run_in_executor(None, download_reel, clean_url),
-            timeout=70.0
+            timeout=80.0
         )
 
         if video_path and os.path.exists(video_path):
@@ -155,7 +135,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             final_upload_path = video_path
 
             if file_size_mb > 49.0:
-                await status_msg.edit_text(f"O vídeo tem {file_size_mb:.1f} MB. A comprimir rapidamente...")
+                await status_msg.edit_text(f"O vídeo tem {file_size_mb:.1f} MB. A comprimir para o limite do Telegram...")
                 compressed_path = await loop.run_in_executor(None, compress_video, video_path)
                 final_upload_path = compressed_path
 
@@ -163,8 +143,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             with open(final_upload_path, 'rb') as video_file:
                 await update.message.reply_video(
                     video=video_file,
-                    write_timeout=180,
-                    read_timeout=180,
+                    write_timeout=240,
+                    read_timeout=240,
                     connect_timeout=60
                 )
             await status_msg.delete()
@@ -175,7 +155,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await status_msg.edit_text("⏱️ O processo demorou demasiado tempo (tempo limite excedido).")
     except Exception as e:
         logging.error(f"Erro no processamento: {e}")
-        await status_msg.edit_text(f"❌ Erro ao processar o vídeo: {str(e)[:120]}")
+        await status_msg.edit_text(f"❌ {str(e)[:150]}")
     finally:
         for path in [video_path, compressed_path]:
             if path and os.path.exists(path):
