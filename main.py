@@ -1,4 +1,5 @@
 import os
+import re
 import logging
 import threading
 import asyncio
@@ -50,18 +51,23 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(user_id):
         await update.message.reply_text("⛔ Acesso não autorizado. Este bot é de uso estritamente privado.")
         return
-    await update.message.reply_text("👋 Olá! Envie o link de um Reels do Instagram que eu baixo para si.")
+    await update.message.reply_text("👋 Olá! Envie o link de um Reels do Instagram que eu baixo para você.")
 
 def download_reel(url: str, output_path: str = "downloads") -> str:
     os.makedirs(output_path, exist_ok=True)
     outtmpl = os.path.join(output_path, "%(id)s.%(ext)s")
+    
     ydl_opts = {
         'format': 'best[ext=mp4]/best',
         'outtmpl': outtmpl,
         'quiet': True,
         'no_warnings': True,
         'socket_timeout': 15,
-        'retries': 3,
+        'retries': 2,
+        'http_headers': {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+            'Accept-Language': 'en-US,en;q=0.9',
+        }
     }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
@@ -73,28 +79,37 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⛔ Acesso negado. Apenas membros autorizados podem utilizar este serviço.")
         return
 
-    text = update.message.text
-    if "instagram.com" not in text:
+    text = update.message.text or ""
+    
+    # Extrai estritamente a URL do Instagram do meio de qualquer texto ou legenda
+    match = re.search(r'(https?://(?:www\.)?instagram\.com/[^\s]+)', text)
+    if not match:
         await update.message.reply_text("Por favor, envie um link válido do Instagram.")
         return
 
-    clean_url = text.split("?")[0]
+    clean_url = match.group(1).split("?")[0]
     status_msg = await update.message.reply_text("A transferir o Reels... aguarde alguns segundos.")
     video_path = None
+    
     try:
-        # Executa o download de forma não-bloqueante numa thread separada
         loop = asyncio.get_running_loop()
-        video_path = await loop.run_in_executor(None, download_reel, clean_url)
+        # Limite máximo de 35 segundos para não ficar preso eternamente
+        video_path = await asyncio.wait_for(
+            loop.run_in_executor(None, download_reel, clean_url),
+            timeout=35.0
+        )
 
         if video_path and os.path.exists(video_path):
             with open(video_path, 'rb') as video_file:
                 await update.message.reply_video(video=video_file)
             await status_msg.delete()
         else:
-            await status_msg.edit_text("Não foi possível localizar o ficheiro transferido.")
+            await status_msg.edit_text("⚠️ Não foi possível localizar o ficheiro transferido.")
+    except asyncio.TimeoutError:
+        await status_msg.edit_text("⏱️ O download demorou muito tempo. O Instagram pode ter bloqueado temporariamente a requisição.")
     except Exception as e:
         logging.error(f"Erro no download: {e}")
-        await status_msg.edit_text(f"Não foi possível transferir o vídeo. Motivo: {str(e)[:120]}")
+        await status_msg.edit_text(f"❌ Não foi possível baixar o vídeo: {str(e)[:100]}")
     finally:
         if video_path and os.path.exists(video_path):
             try:
@@ -106,7 +121,6 @@ if __name__ == '__main__':
     if not TOKEN:
         raise ValueError("A variável TELEGRAM_TOKEN não foi configurada!")
 
-    # Inicia a thread web antes do polling
     web_thread = threading.Thread(target=run_web_server, daemon=True)
     web_thread.start()
 
