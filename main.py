@@ -52,7 +52,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(user_id):
         await update.message.reply_text("⛔ Acesso não autorizado. Este bot é de uso estritamente privado.")
         return
-    await update.message.reply_text("👋 Olá! Envie o link de um Reels do Instagram que eu descarrego para si.")
+    await update.message.reply_text("👋 Olá! Envie o link de um Reels do Instagram que eu descarrego para você.")
 
 def download_reel(url: str, output_path: str = "downloads") -> str:
     os.makedirs(output_path, exist_ok=True)
@@ -101,21 +101,28 @@ def compress_video(input_path: str, target_size_mb: float = 38.0) -> str:
 
     output_path = f"{os.path.splitext(input_path)[0]}_compressed.mp4"
 
-    # Redimensiona para altura máxima de 720p mantendo proporção e usa preset ultrafast para consumir o mínimo de RAM/CPU
+    # Escala segura sem aspas desnecessárias garantindo resolução par (múltiplo de 2)
+    scale_filter = "scale=trunc(iw/2)*2:trunc(ih/2)*2"
+
     cmd = [
         "ffmpeg", "-y", "-i", input_path,
-        "-vf", "scale='min(720,iw)':-2",
+        "-vf", scale_filter,
         "-b:v", f"{int(video_bitrate)}",
-        "-maxrate", f"{int(video_bitrate * 1.2)}",
+        "-maxrate", f"{int(video_bitrate * 1.3)}",
         "-bufsize", f"{int(video_bitrate * 2)}",
         "-preset", "ultrafast",
         "-c:v", "libx264",
+        "-pix_fmt", "yuv420p",
         "-c:a", "aac",
         "-b:a", "96k",
         output_path
     ]
 
-    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True, timeout=90)
+    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=120)
+    if result.returncode != 0:
+        logging.error(f"Erro ffmpeg: {result.stderr}")
+        raise RuntimeError(f"Falha na compressão ffmpeg: {result.stderr[-200:] if result.stderr else 'Erro desconhecido'}")
+
     return output_path
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -149,10 +156,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             if file_size_mb > 49.0:
                 await status_msg.edit_text(f"O vídeo tem {file_size_mb:.1f} MB. A comprimir rapidamente...")
-                compressed_path = await asyncio.wait_for(
-                    loop.run_in_executor(None, compress_video, video_path),
-                    timeout=100.0
-                )
+                compressed_path = await loop.run_in_executor(None, compress_video, video_path)
                 final_upload_path = compressed_path
 
             await status_msg.edit_text("A enviar vídeo para o Telegram...")
