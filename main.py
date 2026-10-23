@@ -52,7 +52,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(user_id):
         await update.message.reply_text("⛔ Acesso não autorizado. Este bot é de uso estritamente privado.")
         return
-    await update.message.reply_text("👋 Olá! Envie o link de um Reels do Instagram que eu descarrego para você.")
+    await update.message.reply_text("👋 Olá! Envie o link de um Reels do Instagram que eu descarrego para si.")
 
 def download_reel(url: str, output_path: str = "downloads") -> str:
     os.makedirs(output_path, exist_ok=True)
@@ -81,7 +81,7 @@ def get_video_duration(file_path: str) -> float:
             "format=duration", "-of", "default=noprint_wrappers=1:nokey=1",
             file_path
         ]
-        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True, timeout=10)
         return float(result.stdout.strip())
     except Exception as e:
         logging.warning(f"Não foi possível obter duração: {e}")
@@ -96,30 +96,32 @@ def compress_video(input_path: str, target_size_mb: float = 38.0) -> str:
     audio_bitrate = 96 * 1024
     video_bitrate = target_total_bitrate - audio_bitrate
 
-    if video_bitrate < 150 * 1024:
-        video_bitrate = 150 * 1024
+    if video_bitrate < 200 * 1024:
+        video_bitrate = 200 * 1024
 
     output_path = f"{os.path.splitext(input_path)[0]}_compressed.mp4"
 
+    # Redimensiona para altura máxima de 720p mantendo proporção e usa preset ultrafast para consumir o mínimo de RAM/CPU
     cmd = [
         "ffmpeg", "-y", "-i", input_path,
+        "-vf", "scale='min(720,iw)':-2",
         "-b:v", f"{int(video_bitrate)}",
-        "-maxrate", f"{int(video_bitrate * 1.3)}",
+        "-maxrate", f"{int(video_bitrate * 1.2)}",
         "-bufsize", f"{int(video_bitrate * 2)}",
-        "-preset", "veryfast",
+        "-preset", "ultrafast",
         "-c:v", "libx264",
         "-c:a", "aac",
         "-b:a", "96k",
         output_path
     ]
 
-    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True, timeout=90)
     return output_path
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not is_authorized(user_id):
-        await update.message.reply_text("⛔ Acesso negado. Apenas usuários autorizados podem utilizar este serviço.")
+        await update.message.reply_text("⛔ Acesso negado. Apenas utilizadores autorizados podem utilizar este serviço.")
         return
 
     text = update.message.text or ""
@@ -146,8 +148,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             final_upload_path = video_path
 
             if file_size_mb > 49.0:
-                await status_msg.edit_text(f"O vídeo tem {file_size_mb:.1f} MB. A comprimir para respeitar o limite de 50 MB...")
-                compressed_path = await loop.run_in_executor(None, compress_video, video_path)
+                await status_msg.edit_text(f"O vídeo tem {file_size_mb:.1f} MB. A comprimir rapidamente...")
+                compressed_path = await asyncio.wait_for(
+                    loop.run_in_executor(None, compress_video, video_path),
+                    timeout=100.0
+                )
                 final_upload_path = compressed_path
 
             await status_msg.edit_text("A enviar vídeo para o Telegram...")
@@ -163,10 +168,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await status_msg.edit_text("⚠️ Não foi possível localizar o ficheiro transferido.")
             
     except asyncio.TimeoutError:
-        await status_msg.edit_text("⏱️ O processo demorou muito tempo. A requisição expirou.")
+        await status_msg.edit_text("⏱️ O processo demorou demasiado tempo (tempo limite excedido).")
     except Exception as e:
         logging.error(f"Erro no processamento: {e}")
-        await status_msg.edit_text(f"❌ Não foi possível enviar o vídeo: {str(e)[:120]}")
+        await status_msg.edit_text(f"❌ Erro ao processar o vídeo: {str(e)[:120]}")
     finally:
         for path in [video_path, compressed_path]:
             if path and os.path.exists(path):
