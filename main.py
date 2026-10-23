@@ -3,7 +3,6 @@ import re
 import logging
 import threading
 import asyncio
-import subprocess
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
@@ -58,8 +57,16 @@ def download_reel(url: str, output_path: str = "downloads") -> str:
     os.makedirs(output_path, exist_ok=True)
     outtmpl = os.path.join(output_path, "%(id)s.%(ext)s")
     
+    # Prioriza formatos com menos de 48 MB ou resoluções médias/baixas para nunca ultrapassar o limite do Telegram
     ydl_opts = {
-        'format': 'best[ext=mp4]/best',
+        'format': (
+            'best[filesize<48M][ext=mp4]/'
+            'bestvideo[filesize<40M][ext=mp4]+bestaudio[ext=m4a]/'
+            'best[height<=720][filesize<48M]/'
+            'worst[filesize<48M]/'
+            'best[height<=720]/'
+            'best'
+        ),
         'outtmpl': outtmpl,
         'quiet': True,
         'no_warnings': True,
@@ -74,41 +81,10 @@ def download_reel(url: str, output_path: str = "downloads") -> str:
         info = ydl.extract_info(url, download=True)
         return ydl.prepare_filename(info)
 
-def compress_video(input_path: str) -> str:
-    output_path = f"{os.path.splitext(input_path)[0]}_compressed.mp4"
-
-    # Redimensiona mantendo proporção para largura máxima de 720px e comprime via CRF 28 (baixo consumo de RAM e alta redução de tamanho)
-    cmd = [
-        "ffmpeg", "-y", "-i", input_path,
-        "-vf", "scale=720:-2:flags=lanczos",
-        "-c:v", "libx264",
-        "-crf", "28",
-        "-preset", "ultrafast",
-        "-pix_fmt", "yuv420p",
-        "-c:a", "aac",
-        "-b:a", "128k",
-        output_path
-    ]
-
-    process = subprocess.run(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        timeout=180
-    )
-
-    if process.returncode != 0:
-        err_msg = process.stderr.strip().splitlines()[-1] if process.stderr else "Erro desconhecido no ffmpeg"
-        logging.error(f"Erro completo ffmpeg: {process.stderr}")
-        raise RuntimeError(f"FFmpeg falhou: {err_msg}")
-
-    return output_path
-
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not is_authorized(user_id):
-        await update.message.reply_text("⛔ Acesso negado. Apenas utilizadores autorizados podem utilizar este serviço.")
+        await update.message.reply_text("⛔ Acesso negado. Apenas usuários autorizados podem utilizar este serviço.")
         return
 
     text = update.message.text or ""
@@ -121,7 +97,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     clean_url = match.group(1).split("?")[0]
     status_msg = await update.message.reply_text("A transferir o Reels... aguarde alguns segundos.")
     video_path = None
-    compressed_path = None
     
     try:
         loop = asyncio.get_running_loop()
@@ -132,37 +107,36 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if video_path and os.path.exists(video_path):
             file_size_mb = os.path.getsize(video_path) / (1024 * 1024)
-            final_upload_path = video_path
 
-            if file_size_mb > 49.0:
-                await status_msg.edit_text(f"O vídeo tem {file_size_mb:.1f} MB. A comprimir para o limite do Telegram...")
-                compressed_path = await loop.run_in_executor(None, compress_video, video_path)
-                final_upload_path = compressed_path
-
-            await status_msg.edit_text("A enviar vídeo para o Telegram...")
-            with open(final_upload_path, 'rb') as video_file:
-                await update.message.reply_video(
-                    video=video_file,
-                    write_timeout=240,
-                    read_timeout=240,
-                    connect_timeout=60
+            if file_size_mb > 49.5:
+                await status_msg.edit_text(
+                    f"⚠️ O Instagram só disponibilizou uma versão de {file_size_mb:.1f} MB deste vídeo, "
+                    "o que ultrapassa o limite máximo de 50 MB permitido pela API de bots do Telegram."
                 )
-            await status_msg.delete()
+            else:
+                await status_msg.edit_text("A enviar vídeo para o Telegram...")
+                with open(video_path, 'rb') as video_file:
+                    await update.message.reply_video(
+                        video=video_file,
+                        write_timeout=240,
+                        read_timeout=240,
+                        connect_timeout=60
+                    )
+                await status_msg.delete()
         else:
-            await status_msg.edit_text("⚠️ Não foi possível localizar o ficheiro transferido.")
+            await status_msg.edit_text("⚠️ Não foi possível localizar o arquivo baixado.")
             
     except asyncio.TimeoutError:
-        await status_msg.edit_text("⏱️ O processo demorou demasiado tempo (tempo limite excedido).")
+        await status_msg.edit_text("⏱️ O processo demorou muito tempo (tempo limite esgotado).")
     except Exception as e:
         logging.error(f"Erro no processamento: {e}")
-        await status_msg.edit_text(f"❌ {str(e)[:150]}")
+        await status_msg.edit_text(f"❌ Não foi possível obter o vídeo: {str(e)[:120]}")
     finally:
-        for path in [video_path, compressed_path]:
-            if path and os.path.exists(path):
-                try:
-                    os.remove(path)
-                except Exception:
-                    pass
+        if video_path and os.path.exists(video_path):
+            try:
+                os.remove(video_path)
+            except Exception:
+                pass
 
 if __name__ == '__main__':
     if not TOKEN:
