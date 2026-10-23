@@ -1,6 +1,7 @@
 import os
 import logging
 import threading
+import asyncio
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
@@ -20,7 +21,7 @@ ALLOWED_USERS = [
 def is_authorized(user_id: int) -> bool:
     return user_id in ALLOWED_USERS
 
-# Servidor HTTP leve para o Health Check e UptimeRobot
+# Servidor HTTP leve para o Health Check do Render e pings do UptimeRobot
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -37,7 +38,6 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         pass
 
 def run_web_server():
-    # Obtém a porta do Render (o Render define PORT=10000 por padrão)
     port_str = os.environ.get("PORT", "10000")
     port = int(port_str)
     server_address = ('0.0.0.0', port)
@@ -60,6 +60,8 @@ def download_reel(url: str, output_path: str = "downloads") -> str:
         'outtmpl': outtmpl,
         'quiet': True,
         'no_warnings': True,
+        'socket_timeout': 15,
+        'retries': 3,
     }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
@@ -80,16 +82,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status_msg = await update.message.reply_text("A transferir o Reels... aguarde alguns segundos.")
     video_path = None
     try:
-        video_path = download_reel(clean_url)
-        with open(video_path, 'rb') as video_file:
-            await update.message.reply_video(video=video_file)
-        await status_msg.delete()
+        # Executa o download de forma não-bloqueante numa thread separada
+        loop = asyncio.get_running_loop()
+        video_path = await loop.run_in_executor(None, download_reel, clean_url)
+
+        if video_path and os.path.exists(video_path):
+            with open(video_path, 'rb') as video_file:
+                await update.message.reply_video(video=video_file)
+            await status_msg.delete()
+        else:
+            await status_msg.edit_text("Não foi possível localizar o ficheiro transferido.")
     except Exception as e:
-        logging.error(f"Erro: {e}")
-        await status_msg.edit_text("Não foi possível transferir o vídeo. O perfil pode ser privado ou o Instagram bloqueou temporariamente.")
+        logging.error(f"Erro no download: {e}")
+        await status_msg.edit_text(f"Não foi possível transferir o vídeo. Motivo: {str(e)[:120]}")
     finally:
         if video_path and os.path.exists(video_path):
-            os.remove(video_path)
+            try:
+                os.remove(video_path)
+            except Exception:
+                pass
 
 if __name__ == '__main__':
     if not TOKEN:
