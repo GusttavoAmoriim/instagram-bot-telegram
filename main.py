@@ -22,7 +22,7 @@ ALLOWED_USERS = [
 def is_authorized(user_id: int) -> bool:
     return user_id in ALLOWED_USERS
 
-# Servidor HTTP leve para o Health Check do Render e pings do UptimeRobot
+# Servidor HTTP para Health Check do Render e pings do UptimeRobot
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -51,15 +51,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(user_id):
         await update.message.reply_text("⛔ Acesso não autorizado. Este bot é de uso estritamente privado.")
         return
-    await update.message.reply_text("👋 Olá! Envie o link de um Reels do Instagram que eu baixo para você.")
+    await update.message.reply_text("👋 Olá! Envie o link de um Reels do Instagram que eu descarrego para si.")
 
 def download_reel(url: str, output_path: str = "downloads") -> str:
     os.makedirs(output_path, exist_ok=True)
     outtmpl = os.path.join(output_path, "%(id)s.%(ext)s")
     
+    # Seleciona resoluções controladas (até 720p) e formatos mais leves para não estourar 50 MB
     ydl_opts = {
-        # Prioriza formatos que fiquem abaixo de 49 MB para respeitar o teto do Telegram
-        'format': 'best[filesize<49M][ext=mp4]/bestvideo[filesize<42M]+bestaudio/best[ext=mp4]/best',
+        'format': 'bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best[ext=mp4]/best',
         'outtmpl': outtmpl,
         'quiet': True,
         'no_warnings': True,
@@ -77,12 +77,11 @@ def download_reel(url: str, output_path: str = "downloads") -> str:
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not is_authorized(user_id):
-        await update.message.reply_text("⛔ Acesso negado. Apenas membros autorizados podem utilizar este serviço.")
+        await update.message.reply_text("⛔ Acesso negado. Apenas utilizadores autorizados podem utilizar este serviço.")
         return
 
     text = update.message.text or ""
     
-    # Extrai o link do Instagram mesmo se houver texto ou legenda na mensagem
     match = re.search(r'(https?://(?:www\.)?instagram\.com/[^\s]+)', text)
     if not match:
         await update.message.reply_text("Por favor, envie um link válido do Instagram.")
@@ -94,25 +93,27 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         loop = asyncio.get_running_loop()
-        # Tempo limite de 45 segundos para a conclusão do download
         video_path = await asyncio.wait_for(
             loop.run_in_executor(None, download_reel, clean_url),
-            timeout=45.0
+            timeout=60.0
         )
 
         if video_path and os.path.exists(video_path):
             file_size_mb = os.path.getsize(video_path) / (1024 * 1024)
             
-            # Limite de 50 MB imposto pela API de Bots do Telegram
+            # Limite estrito de 50 MB imposto pela API de Bots do Telegram
             if file_size_mb > 49.5:
-                await status_msg.edit_text(f"⚠️ O vídeo tem {file_size_mb:.1f} MB e ultrapassa o limite de 50 MB permitido pela API do Telegram.")
+                await status_msg.edit_text(
+                    f"⚠️ O vídeo transferido tem {file_size_mb:.1f} MB.\n"
+                    "O Telegram limita o envio de ficheiros por bots a 50 MB."
+                )
             else:
                 await status_msg.edit_text("A enviar vídeo para o Telegram...")
                 with open(video_path, 'rb') as video_file:
                     await update.message.reply_video(
                         video=video_file,
-                        write_timeout=120,
-                        read_timeout=120,
+                        write_timeout=180,
+                        read_timeout=180,
                         connect_timeout=60
                     )
                 await status_msg.delete()
@@ -120,10 +121,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await status_msg.edit_text("⚠️ Não foi possível localizar o ficheiro transferido.")
             
     except asyncio.TimeoutError:
-        await status_msg.edit_text("⏱️ O download demorou demasiado tempo. O Instagram pode estar a restringir temporariamente a ligação.")
+        await status_msg.edit_text("⏱️ O download demorou demasiado tempo. A ligação com o Instagram expirou.")
     except Exception as e:
         logging.error(f"Erro no processamento: {e}")
-        await status_msg.edit_text(f"❌ Não foi possível enviar o vídeo: {str(e)[:120]}")
+        await status_msg.edit_text(f"❌ Não foi possível concluir o envio: {str(e)[:120]}")
     finally:
         if video_path and os.path.exists(video_path):
             try:
@@ -135,7 +136,6 @@ if __name__ == '__main__':
     if not TOKEN:
         raise ValueError("A variável TELEGRAM_TOKEN não foi configurada!")
 
-    # Inicia o servidor HTTP em background para responder ao Render e UptimeRobot
     web_thread = threading.Thread(target=run_web_server, daemon=True)
     web_thread.start()
 
